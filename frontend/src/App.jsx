@@ -61,33 +61,35 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const mediaStreamRef = useRef(null);
 
-  useEffect(() => {
-    // create session on first load, then refresh sessions and select newly created
-    (async () => {
-      try {
-        const sessionName = pdtNowName();
-        const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_name: sessionName }),
-        });
-        if (!res.ok) {
-          console.warn("Could not create session (maybe already exists)");
-        }
-      } catch (e) {
-        console.error("Error creating session", e);
-      }
+async function handleNewSession() {
+  try {
+    const name = pdtNowName();
+    const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_name: name }),
+    });
 
-      await refreshSessions();
-    })();
+    if (!res.ok) {
+      setMessage("Could not create session");
+      return;
+    }
 
-    // cleanup on unmount
-    return () => {
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-      }
-    };
-  }, []);
+    await refreshSessions(); // refresh + auto select last session
+    setMessage("New session created");
+  } catch (e) {
+    setMessage("Session error: " + e.message);
+  }
+}
+
+useEffect(() => {
+  refreshSessions();
+
+  return () => {
+    if (mediaStreamRef.current)
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+  };
+}, []);
 
   async function refreshSessions(selectUuid) {
     try {
@@ -231,9 +233,18 @@ export default function App() {
       {/* Sidebar */}
       <aside className="w-64 bg-white border-r">
         <div className="p-4 border-b">
-          <h2 className="text-xl font-semibold">Sessions</h2>
+          <h2 className="text-xl font-semibold flex items-center justify-between">
+            Sessions
+            <button
+              onClick={handleNewSession}
+              className="px-2 py-1 text-xs rounded bg-blue-600 text-white"
+            >
+              + New
+            </button>
+          </h2>
           <p className="text-sm text-gray-500">Scout: {USER_ID}</p>
         </div>
+
         <div className="p-2 overflow-auto" style={{ height: "calc(100vh - 88px)" }}>
           {sessions.length === 0 && <div className="p-4 text-gray-500">No sessions yet.</div>}
           {sessions.map((s) => (
