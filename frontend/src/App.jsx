@@ -299,31 +299,38 @@ async function handleStartRecording() {
               {/* Dropdown */}
               {menuOpenSession === s.session_uuid && (
                 <div className="absolute right-0 top-full mt-1 w-28 bg-white border rounded shadow z-50">
-                  <button
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      if (!window.confirm("Are you sure you want to delete this session?")) return;
-                      try {
-                        const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions/${s.session_uuid}`, {
-                          method: "DELETE",
-                        });
-                        if (!res.ok) {
-                          setMessage("Failed to delete session");
-                          return;
-                        }
-                        setMessage("Session deleted");
-                        await refreshSessions();
-                      } catch (err) {
-                        console.error(err);
-                        setMessage("Delete error: " + err.message);
-                      } finally {
-                        setMenuOpenSession(null);
-                      }
-                    }}
-                    className="w-full text-left px-3 py-1 text-red-500 hover:bg-red-50 rounded"
-                  >
-                    Delete
-                  </button>
+                <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (!window.confirm("Are you sure you want to delete this session?")) return;
+                  try {
+                    const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions/${s.session_uuid}`, {
+                      method: "DELETE",
+                    });
+                    if (!res.ok) {
+                      setMessage("Failed to delete session");
+                      return;
+                    }
+                    setMessage("Session deleted");
+
+                    // Clear selected session if it was deleted
+                    if (selectedSession === s.session_uuid) {
+                      setSelectedSession(null);
+                      setTranscripts([]);
+                    }
+
+                    await refreshSessions();
+                  } catch (err) {
+                    console.error(err);
+                    setMessage("Delete error: " + err.message);
+                  } finally {
+                    setMenuOpenSession(null);
+                  }
+                }}
+                className="w-full text-left px-3 py-1 text-red-500 hover:bg-red-50 rounded"
+              >
+                Delete
+              </button>
                 </div>
               )}
             </div>
