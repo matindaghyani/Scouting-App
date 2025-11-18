@@ -1,16 +1,30 @@
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Optional, Dict
+from typing import Optional, List
+from uuid import uuid4
+from datetime import datetime
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from pydantic_settings import BaseSettings
 from openai import OpenAI
 
+from sqlalchemy import (
+    create_engine,
+    Column,
+    String,
+    Integer,
+    DateTime,
+    Text,
+    ForeignKey,
+)
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 class Settings(BaseSettings):
     openai_api_key: str
+    stt_model: str = "whisper-1"
+    gpt_model: str = "gpt-4.1-mini"
 
     smtp_host: str
     smtp_port: int = 587
@@ -19,8 +33,7 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     from_email: EmailStr
 
-    stt_model: str = "whisper-1"
-    gpt_model: str = "gpt-4.1-mini"
+    database_url: str = "sqlite:///./scouting.db"
 
     class Config:
         env_file = ".env"
@@ -29,29 +42,88 @@ class Settings(BaseSettings):
 settings = Settings()
 client = OpenAI(api_key=settings.openai_api_key)
 
+DATABASE_URL = settings.database_url
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+Base = declarative_base()
 
-app = FastAPI(title="Hockey Scouting Backend")
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, unique=True, index=True, nullable=False)
+
+    sessions = relationship("SessionModel", back_populates="user")
+
+class SessionModel(Base):
+    __tablename__ = "sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    session_uuid = Column(String, unique=True, index=True, nullable=False)
+    user_id = Column(String, ForeignKey("users.user_id"), index=True, nullable=False)
+    session_name = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+
+    user = relationship("User", back_populates="sessions")
+    transcripts = relationship("Transcript", back_populates="session", cascade="all, delete-orphan", order_by="Transcript.timestamp")
+
+class Transcript(Base):
+    __tablename__ = "transcripts"
+    id = Column(Integer, primary_key=True, index=True)
+    transcript_uuid = Column(String, unique=True, index=True, nullable=False)
+    session_uuid = Column(String, ForeignKey("sessions.session_uuid"), index=True, nullable=False)
+    filename = Column(String, nullable=True)
+    transcript = Column(Text, nullable=False)
+    timestamp = Column(DateTime, nullable=False)
+
+    session = relationship("SessionModel", back_populates="transcripts")
+
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="Hockey Scouting Backend (DB + Session Summaries)")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+class CreateSessionRequest(BaseModel):
+    session_name: Optional[str] = None
 
-USER_EMAILS: Dict[str, str] = {}
+class CreateSessionResponse(BaseModel):
+    session_uuid: str
+    session_name: Optional[str]
+    created_at: str
 
-class SetEmailRequest(BaseModel):
+class TranscriptResponse(BaseModel):
+    transcript_uuid: str
+    filename: Optional[str]
+    transcript: str
+    timestamp: str
+
+class SendEmailRequest(BaseModel):
     user_id: str
-    coach_email: EmailStr
-
-
-class ScoutEmailRequest(BaseModel):
+    session_uuid: str
     to_email: EmailStr
-    subject: str
-    raw_transcript: str
-    organized_summary: str
+    include_summary: Optional[bool] = False
+    subject: Optional[str] = "Hockey scouting report"
+
+def get_db() -> Session:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def get_or_create_user(db: Session, user_id: str) -> User:
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        user = User(user_id=user_id)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    return user
 
 def send_email(
     to_email: str,
@@ -59,9 +131,6 @@ def send_email(
     body_html: str,
     body_text: Optional[str] = None,
 ) -> None:
-    """
-    Basic SMTP email sender.
-    """
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = settings.from_email
@@ -85,161 +154,178 @@ def send_email(
         raise HTTPException(status_code=500, detail=f"Failed to send email: {e}")
 
 
-async def transcribe_audio(file: UploadFile) -> str:
+def build_email_html(subject: str, transcripts: List[TranscriptResponse], session_summary: Optional[str] = None) -> str:
+    transcripts_html = "".join(
+        f"<h4>{t.timestamp}</h4><pre style='white-space: pre-wrap; font-family: monospace;'>{t.transcript}</pre><hr/>"
+        for t in transcripts
+    )
+    summary_section = f"<h3>Session Summary</h3><div>{session_summary}</div><hr/>" if session_summary else ""
+    return f"""
+    <html>
+      <body style="font-family: Arial, sans-serif;">
+        <h2>{subject}</h2>
+        {summary_section}
+        <h3>Transcripts</h3>
+        <div>{transcripts_html}</div>
+      </body>
+    </html>
     """
-    Send audio file to OpenAI for transcription.
-    Compatible with the new openai-python SDK.
-    """
-    try:
-        contents = await file.read()  # bytes
 
+async def transcribe_audio(file: UploadFile) -> str:
+    try:
+        contents = await file.read()
         transcription = client.audio.transcriptions.create(
-            model=settings.stt_model,  # e.g. "whisper-1"
+            model=settings.stt_model,
             file=(file.filename or "audio-file", contents),
         )
-
         text = getattr(transcription, "text", None)
-        if not text:
+        if text is None:
             raise RuntimeError("No text returned from transcription.")
         return text
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Transcription error: {e}")
 
 
-async def summarize_notes(transcript: str) -> str:
-    """
-    Use GPT to organize and summarize the scouting notes.
-    """
+async def summarize_session_text(session_text: str) -> str:
     system_prompt = """
-You are an assistant helping a hockey scout structure their spoken notes.
+You are an assistant that summarizes a hockey scouting session's transcripts.
 
-Given a raw transcript, produce a concise, structured report with:
-
-- Game context (teams, level, date if mentioned)
-- Player observations grouped by player (name / number if present)
-  - Strengths
-  - Weaknesses
-  - Notable plays
-- Overall recommendations (e.g. follow-up scouting, potential fit, questions)
-- Any data-quality notes (e.g. unclear audio, missing names)
-
-Output in clear markdown.
+Produce a concise session-level summary including:
+- Game context if available
+- Key player observations (group by player if names/numbers appear)
+- Overall recommendations
+Keep the summary concise (bullet points or short paragraphs).
 """
-
     try:
         completion = client.chat.completions.create(
             model=settings.gpt_model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Raw transcript:\n\n{transcript}"},
+                {"role": "user", "content": f"Session transcripts:\n\n{session_text}"},
             ],
-            temperature=0.3,
+            temperature=0.2,
+            max_tokens=800,
         )
         return completion.choices[0].message.content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summarization error: {e}")
 
 
-def build_email_html(subject: str, transcript: str, summary: str) -> str:
-    """
-    Simple HTML template for the coach email.
-    """
-    return f"""
-    <html>
-      <body style="font-family: Arial, sans-serif;">
-        <h2>{subject}</h2>
-        <h3>Organized Scouting Report</h3>
-        <div>{summary}</div>
-        <hr />
-        <h3>Raw Transcript</h3>
-        <pre style="white-space: pre-wrap; font-family: monospace;">
-{transcript}
-        </pre>
-      </body>
-    </html>
-    """
-    
-@app.post("/api/users/set-email")
-async def set_coach_email(payload: SetEmailRequest):
-    """
-    Store the coach's email for a given user (scout).
-    """
-    USER_EMAILS[payload.user_id] = payload.coach_email
-    return {
-        "message": "Coach email saved successfully.",
-        "user_id": payload.user_id,
-        "coach_email": payload.coach_email,
-    }
+@app.post("/api/users/{user_id}/sessions", response_model=CreateSessionResponse)
+async def create_session(user_id: str, payload: CreateSessionRequest):
+    db = next(get_db())
+    user = get_or_create_user(db, user_id)
+    session_uuid = str(uuid4())
+    now = datetime.now().replace(second=0, microsecond=0)
+    session = SessionModel(session_uuid=session_uuid, user_id=user.user_id, session_name=payload.session_name, created_at=now)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return CreateSessionResponse(session_uuid=session.session_uuid, session_name=session.session_name, created_at=session.created_at.isoformat() + "Z")
 
 
-@app.get("/api/users/{user_id}/email")
-async def get_coach_email(user_id: str):
-    """
-    Fetch the stored coach email for a user.
-    """
-    coach_email = USER_EMAILS.get(user_id)
-    if not coach_email:
-        raise HTTPException(
-            status_code=404,
-            detail="Coach email not set for this user.",
+@app.get("/api/users/{user_id}/sessions", response_model=List[CreateSessionResponse])
+async def list_sessions(user_id: str):
+    db = next(get_db())
+    sessions = db.query(SessionModel).filter(SessionModel.user_id == user_id).all()
+    return [CreateSessionResponse(session_uuid=s.session_uuid, session_name=s.session_name, created_at=s.created_at.isoformat() + "Z") for s in sessions]
+
+
+@app.get("/api/users/{user_id}/sessions/{session_uuid}/transcripts", response_model=List[TranscriptResponse])
+async def get_session_transcripts(user_id: str, session_uuid: str = Path(...)):
+    db = next(get_db())
+    session = db.query(SessionModel).filter(SessionModel.session_uuid == session_uuid, SessionModel.user_id == user_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    transcripts = db.query(Transcript).filter(Transcript.session_uuid == session_uuid).order_by(Transcript.timestamp).all()
+    return [
+        TranscriptResponse(
+            transcript_uuid=t.transcript_uuid,
+            filename=t.filename,
+            transcript=t.transcript,
+            timestamp=t.timestamp.isoformat() + "Z",
         )
-    return {"user_id": user_id, "coach_email": coach_email}
+        for t in transcripts
+    ]
 
 
-@app.post("/api/scout/upload-audio")
-async def upload_audio(
-    audio: UploadFile = File(...),
-    user_id: str = Form(...),
-    subject: str = Form("Hockey scouting report"),
+@app.post("/api/users/{user_id}/sessions/{session_uuid}/upload-audio", response_model=List[TranscriptResponse])
+async def upload_audio_to_session(
+    user_id: str,
+    session_uuid: str,
+    audio: UploadFile = File(...)
 ):
-    """
-    Full pipeline:
+    db = next(get_db())
+    session = db.query(SessionModel).filter(SessionModel.session_uuid == session_uuid, SessionModel.user_id == user_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="User or session not found.")
 
-    1) Look up coach email for user_id
-    2) Transcribe audio
-    3) Summarize/organize notes
-    4) Email coach
-    5) Return transcript & summary
-    """
-    coach_email = USER_EMAILS.get(user_id)
-    if not coach_email:
-        raise HTTPException(
-            status_code=400,
-            detail="Coach email not set for this user. Call /api/users/set-email first.",
+    transcript_text = await transcribe_audio(audio)
+    transcript_obj = Transcript(
+        transcript_uuid=str(uuid4()),
+        session_uuid=session_uuid,
+        filename=audio.filename,
+        transcript=transcript_text,
+        timestamp=datetime.now().replace(second=0, microsecond=0),
+    )
+    db.add(transcript_obj)
+    db.commit()
+    db.refresh(transcript_obj)
+
+    transcripts_list = db.query(Transcript).filter(Transcript.session_uuid == session_uuid).order_by(Transcript.timestamp).all()
+    return [
+        TranscriptResponse(
+            transcript_uuid=t.transcript_uuid,
+            filename=t.filename,
+            transcript=t.transcript,
+            timestamp=t.timestamp.isoformat() + "Z",
         )
+        for t in transcripts_list
+    ]
 
-    transcript = await transcribe_audio(audio)
-    summary = await summarize_notes(transcript)
 
-    html = build_email_html(subject=subject, transcript=transcript, summary=summary)
-    send_email(to_email=coach_email, subject=subject, body_html=html)
+@app.get("/api/users/{user_id}/sessions/{session_uuid}/summary")
+async def get_session_summary(user_id: str, session_uuid: str = Path(...)):
+    db = next(get_db())
+    session = db.query(SessionModel).filter(SessionModel.session_uuid == session_uuid, SessionModel.user_id == user_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
 
-    return {
-        "message": "Scouting report processed and emailed successfully.",
-        "user_id": user_id,
-        "coach_email": coach_email,
-        "subject": subject,
-        "transcript": transcript,
-        "summary": summary,
-    }
+    transcripts_all = db.query(Transcript).filter(Transcript.session_uuid == session_uuid).order_by(Transcript.timestamp).all()
+    if not transcripts_all:
+        raise HTTPException(status_code=404, detail="No transcripts for this session.")
+
+    concatenated = "\n\n".join(t.transcript for t in transcripts_all)
+    summary_text = await summarize_session_text(concatenated)
+    return {"session_uuid": session_uuid, "summary": summary_text}
 
 
 @app.post("/api/scout/email-existing-text")
-async def email_existing_text(payload: ScoutEmailRequest):
-    """
-    Use this if the frontend already has transcript & summary (possibly edited)
-    and just needs to send the email.
-    """
-    html = build_email_html(
-        subject=payload.subject,
-        transcript=payload.raw_transcript,
-        summary=payload.organized_summary,
-    )
-    send_email(
-        to_email=payload.to_email,
-        subject=payload.subject,
-        body_html=html,
-    )
+async def email_existing_text(payload: SendEmailRequest):
+    db = next(get_db())
+    session = db.query(SessionModel).filter(SessionModel.session_uuid == payload.session_uuid, SessionModel.user_id == payload.user_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    transcripts = db.query(Transcript).filter(Transcript.session_uuid == payload.session_uuid).order_by(Transcript.timestamp).all()
+    transcript_obj = [
+        TranscriptResponse(
+            transcript_uuid=t.transcript_uuid,
+            filename=t.filename,
+            transcript=t.transcript,
+            timestamp=t.timestamp.isoformat() + "Z",
+        )
+        for t in transcripts
+    ]
+
+    session_summary_text = None
+    if payload.include_summary:
+        concatenated = "\n\n".join(t.transcript for t in transcripts)
+        session_summary_text = await summarize_session_text(concatenated)
+
+    html = build_email_html(subject=payload.subject, transcripts=transcript_obj, session_summary=session_summary_text)
+    send_email(to_email=payload.to_email, subject=payload.subject, body_html=html)
+
     return {"message": "Email sent successfully."}
 
 

@@ -1,6 +1,8 @@
 fastapi
 uvicorn[standard]
 python-multipart
-pydantic[email]
+pydantic
+pydantic-settings
 openai
-jinja2 
+sqlalchemy
+requests
