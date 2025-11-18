@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from pydantic_settings import BaseSettings
 from openai import OpenAI
+from fastapi import status
 
 from sqlalchemy import (
     create_engine,
@@ -329,6 +330,19 @@ async def email_existing_text(payload: SendEmailRequest):
 
     return {"message": "Email sent successfully."}
 
+@app.delete("/api/users/{user_id}/sessions/{session_uuid}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(user_id: str, session_uuid: str):
+    db = next(get_db())
+    session = db.query(SessionModel).filter(
+        SessionModel.session_uuid == session_uuid,
+        SessionModel.user_id == user_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    db.delete(session)
+    db.commit()
+    return
 
 @app.get("/health")
 async def health():

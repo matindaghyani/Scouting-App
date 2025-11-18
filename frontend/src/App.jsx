@@ -60,6 +60,8 @@ export default function App() {
   const [includeSummary, setIncludeSummary] = useState(false);
   const [loading, setLoading] = useState(false);
   const mediaStreamRef = useRef(null);
+  const [menuOpenSession, setMenuOpenSession] = useState(null); // currently open menu
+
 
 async function handleNewSession() {
   try {
@@ -126,35 +128,53 @@ useEffect(() => {
     }
   }
 
-  async function handleStartRecording() {
-    setMessage(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-      const options = {};
-      // mimeType feature detection
-      if (MediaRecorder.isTypeSupported("audio/webm")) options.mimeType = "audio/webm";
-      const mr = new MediaRecorder(stream, options);
-      const chunks = [];
-      mr.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      };
-      mr.onstop = async () => {
-        setAudioChunks(chunks.slice());
-        await uploadAudioBlob(new Blob(chunks, { type: chunks[0]?.type || "audio/webm" }));
-        // stop tracks
-        stream.getTracks().forEach((t) => t.stop());
-        mediaStreamRef.current = null;
-      };
-      mr.start();
-      setRecorder(mr);
-      setAudioChunks([]);
-      setIsRecording(true);
-    } catch (e) {
-      console.error(e);
-      setMessage("Could not start recording: " + (e.message || e));
+async function handleStartRecording() {
+  setMessage(null);
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      sampleRate: 48000,
+      noiseSuppression: false,
+      echoCancellation: false
     }
-  }
+  });
+
+  mediaStreamRef.current = stream;
+
+  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "audio/webm";
+
+  const mr = new MediaRecorder(stream, { mimeType: mime });
+  const chunks = [];
+
+  mr.ondataavailable = (e) => {
+    console.log("chunk:", e.data.size);
+    if (e.data.size > 0) chunks.push(e.data);
+  };
+
+  mr.onstop = async () => {
+
+    if (!chunks.length) {
+      setMessage("⚠ No audio captured!");
+      return;
+    }
+
+    const blob = new Blob(chunks, { type: mime });
+
+    await uploadAudioBlob(blob);
+
+    stream.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+  };
+
+  mr.start(250);   
+  setRecorder(mr);
+  setAudioChunks([]);
+  setIsRecording(true);
+}
+
 
   function handleStopRecording() {
     if (recorder) {
@@ -242,24 +262,74 @@ useEffect(() => {
               + New
             </button>
           </h2>
-          <p className="text-sm text-gray-500">Scout: {USER_ID}</p>
         </div>
 
         <div className="p-2 overflow-auto" style={{ height: "calc(100vh - 88px)" }}>
           {sessions.length === 0 && <div className="p-4 text-gray-500">No sessions yet.</div>}
-          {sessions.map((s) => (
+         {sessions.map((s) => (
+          <div
+            key={s.session_uuid}
+            className={`p-3 my-2 rounded cursor-pointer flex justify-between items-center relative ${selectedSession === s.session_uuid ? "bg-blue-50 border-l-4 border-blue-500" : "hover:bg-gray-50"}`}
+          >
+            {/* Clicking the left side selects the session */}
             <div
-              key={s.session_uuid}
+              className="flex-1"
               onClick={() => {
                 setSelectedSession(s.session_uuid);
                 loadTranscripts(s.session_uuid);
+                setMenuOpenSession(null); // close menu
               }}
-              className={`p-3 my-2 rounded cursor-pointer ${selectedSession === s.session_uuid ? "bg-blue-50 border-l-4 border-blue-500" : "hover:bg-gray-50"}`}
             >
               <div className="text-sm font-medium">{s.session_name || "Untitled session"}</div>
               <div className="text-xs text-gray-500 mt-1">{new Date(s.created_at).toLocaleString()}</div>
             </div>
-          ))}
+
+            {/* Three-dot menu */}
+            <div className="relative">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMenuOpenSession(menuOpenSession === s.session_uuid ? null : s.session_uuid);
+                }}
+                className="px-2 py-1 hover:bg-gray-100 rounded"
+              >
+                &#x22EE;
+              </button>
+
+              {/* Dropdown */}
+              {menuOpenSession === s.session_uuid && (
+                <div className="absolute right-0 top-full mt-1 w-28 bg-white border rounded shadow z-50">
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (!window.confirm("Are you sure you want to delete this session?")) return;
+                      try {
+                        const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions/${s.session_uuid}`, {
+                          method: "DELETE",
+                        });
+                        if (!res.ok) {
+                          setMessage("Failed to delete session");
+                          return;
+                        }
+                        setMessage("Session deleted");
+                        await refreshSessions();
+                      } catch (err) {
+                        console.error(err);
+                        setMessage("Delete error: " + err.message);
+                      } finally {
+                        setMenuOpenSession(null);
+                      }
+                    }}
+                    className="w-full text-left px-3 py-1 text-red-500 hover:bg-red-50 rounded"
+                  >
+                    Delete
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+
         </div>
         <div className="p-4 border-t text-xs text-gray-500">API: {API_BASE}</div>
       </aside>
