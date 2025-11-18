@@ -1,7 +1,4 @@
-.env
-__pycache__
-*.db
-
+# Logs
 logs
 *.log
 npm-debug.log*

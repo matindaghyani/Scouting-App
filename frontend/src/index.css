@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* small extra default body padding for nicer look */
+body { @apply bg-gray-100; }
