@@ -128,16 +128,84 @@ useEffect(() => {
     }
   }
 
+async function ensureSessionBeforeRecording() {
+  if (!selectedSession) {
+    setMessage("Creating a new session...");
+    const name = pdtNowName();
+    try {
+      const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_name: name }),
+      });
+      if (!res.ok) {
+        setMessage("Could not create session");
+        return false;
+      }
+      await refreshSessions(); // auto-select the new session
+      setMessage("New session created, starting recording...");
+      return true;
+    } catch (e) {
+      setMessage("Session creation error: " + e.message);
+      return false;
+    }
+  }
+  return true; // session already exists
+}
+
+async function refreshSessions(selectUuid) {
+  try {
+    const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions`);
+    const data = await res.json();
+    setSessions(data || []);
+
+    if (data && data.length > 0) {
+      const toSelect = selectUuid || data[data.length - 1].session_uuid;
+      setSelectedSession(toSelect);
+      await loadTranscripts(toSelect);
+      return toSelect; // RETURN the selected session UUID
+    }
+    return null;
+  } catch (e) {
+    console.error(e);
+    return null;
+  }
+}
+
+async function ensureSessionBeforeRecording() {
+  if (!selectedSession) {
+    setMessage("Creating a new session...");
+    const name = pdtNowName();
+    try {
+      const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_name: name }),
+      });
+      if (!res.ok) {
+        setMessage("Could not create session");
+        return null;
+      }
+
+      const newSessionUuid = await refreshSessions(); // auto-select the new session
+      setMessage("New session created, starting recording...");
+      return newSessionUuid; // RETURN the UUID
+    } catch (e) {
+      setMessage("Session creation error: " + e.message);
+      return null;
+    }
+  }
+  return selectedSession; // session already exists
+}
+
 async function handleStartRecording() {
   setMessage(null);
 
+  const sessionToUse = await ensureSessionBeforeRecording();
+  if (!sessionToUse) return;
+
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      sampleRate: 48000,
-      noiseSuppression: false,
-      echoCancellation: false
-    }
+    audio: { channelCount: 1, sampleRate: 48000, noiseSuppression: false, echoCancellation: false }
   });
 
   mediaStreamRef.current = stream;
@@ -150,26 +218,24 @@ async function handleStartRecording() {
   const chunks = [];
 
   mr.ondataavailable = (e) => {
-    console.log("chunk:", e.data.size);
     if (e.data.size > 0) chunks.push(e.data);
   };
 
   mr.onstop = async () => {
-
     if (!chunks.length) {
       setMessage("⚠ No audio captured!");
       return;
     }
 
     const blob = new Blob(chunks, { type: mime });
-
-    await uploadAudioBlob(blob);
+    await uploadAudioBlob(blob, sessionToUse); // pass session explicitly
 
     stream.getTracks().forEach((t) => t.stop());
     mediaStreamRef.current = null;
   };
 
-  mr.start(250);   
+  mr.start(250);
+
   setRecorder(mr);
   setAudioChunks([]);
   setIsRecording(true);
@@ -184,33 +250,37 @@ async function handleStartRecording() {
     setIsRecording(false);
   }
 
-  async function uploadAudioBlob(blob) {
-    if (!selectedSession) {
-      setMessage("No session selected.");
+  async function uploadAudioBlob(blob, sessionUuid) {
+  const uuid = sessionUuid || selectedSession;
+  if (!uuid) {
+    setMessage("No session selected.");
+    return;
+  }
+  setMessage("Uploading audio...");
+  try {
+    const form = new FormData();
+    const filename = `recording_${Date.now()}.webm`;
+    form.append("audio", blob, filename);
+
+    const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions/${uuid}/upload-audio`, {
+      method: "POST",
+      body: form,
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      setMessage("Upload failed: " + err);
       return;
     }
-    setMessage("Uploading audio...");
-    try {
-      const form = new FormData();
-      const filename = `recording_${Date.now()}.webm`;
-      form.append("audio", blob, filename);
-      const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions/${selectedSession}/upload-audio`, {
-        method: "POST",
-        body: form,
-      });
-      if (!res.ok) {
-        const err = await res.text();
-        setMessage("Upload failed: " + err);
-        return;
-      }
-      const data = await res.json();
-      setTranscripts(data || []);
-      setMessage("Uploaded and transcribed.");
-    } catch (e) {
-      console.error(e);
-      setMessage("Upload error: " + (e.message || e));
-    }
+
+    const data = await res.json();
+    setTranscripts(data || []);
+    setMessage("Uploaded and transcribed.");
+  } catch (e) {
+    console.error(e);
+    setMessage("Upload error: " + (e.message || e));
   }
+}
 
   async function handleSendEmail(e) {
     e.preventDefault();
@@ -281,7 +351,6 @@ async function handleStartRecording() {
               }}
             >
               <div className="text-sm font-medium">{s.session_name || "Untitled session"}</div>
-              <div className="text-xs text-gray-500 mt-1">{new Date(s.created_at).toLocaleString()}</div>
             </div>
 
             {/* Three-dot menu */}
@@ -349,19 +418,40 @@ async function handleStartRecording() {
 
           <div className="mt-12">
             <div className="flex flex-col items-center">
-              <button
-                onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
-                className={`rounded-full shadow-lg flex items-center justify-center transition-transform ${isRecording ? "scale-95" : "hover:scale-105"}`}
-                style={{ width: 180, height: 180, background: "#2F80ED", color: "white" }}
-              >
-                <div className="text-center">
-                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="mx-auto">
-                    <path d="M12 14a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v4a3 3 0 0 0 3 3z" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                    <path d="M19 11v1a7 7 0 0 1-14 0v-1" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  <div className="mt-3 font-semibold">{isRecording ? "Recording..." : "Tap to Record"}</div>
-                </div>
-              </button>
+           <button
+  onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
+  className={`
+    flex items-center justify-center rounded-full shadow-xl transition-all
+    ${isRecording ? "bg-red-400" : "bg-blue-500 hover:scale-105"}
+  `}
+  style={{
+    width: 150,
+    height: 150,
+    transition: "background 0.3s ease, transform 0.15s ease",
+  }}
+>
+
+  {/* --- ICONS --- */}
+  {!isRecording ? (
+    // Microphone icon
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+      <path d="M12 14a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v4a3 3 0 0 0 3 3z"/>
+      <path d="M19 11v1a7 7 0 0 1-14 0v-1"/>
+    </svg>
+  ) : (
+    // Stop square
+    <div className="bg-white rounded-sm" style={{ width: 25, height: 25 }}></div>
+  )}
+
+</button>
+
+<div className="mt-4 text-center font-semibold text-gray-700">
+  {isRecording ? (
+    <span className="text-red-500">Recording...</span>
+  ) : (
+    "Tap to Record"
+  )}
+</div>
 
               <div className="mt-4 text-gray-600">Scout notes will appear below</div>
             </div>
