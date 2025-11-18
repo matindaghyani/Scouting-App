@@ -4,6 +4,7 @@ from email.mime.text import MIMEText
 from typing import Optional, List
 from uuid import uuid4
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
@@ -216,19 +217,19 @@ async def create_session(user_id: str, payload: CreateSessionRequest):
     db = next(get_db())
     user = get_or_create_user(db, user_id)
     session_uuid = str(uuid4())
-    now = datetime.now().replace(second=0, microsecond=0)
+    now = datetime.now(ZoneInfo("America/Los_Angeles")).replace(second=0, microsecond=0)
     session = SessionModel(session_uuid=session_uuid, user_id=user.user_id, session_name=payload.session_name, created_at=now)
     db.add(session)
     db.commit()
     db.refresh(session)
-    return CreateSessionResponse(session_uuid=session.session_uuid, session_name=session.session_name, created_at=session.created_at.isoformat() + "Z")
+    return CreateSessionResponse(session_uuid=session.session_uuid, session_name=session.session_name, created_at=session.created_at.isoformat())
 
 
 @app.get("/api/users/{user_id}/sessions", response_model=List[CreateSessionResponse])
 async def list_sessions(user_id: str):
     db = next(get_db())
     sessions = db.query(SessionModel).filter(SessionModel.user_id == user_id).all()
-    return [CreateSessionResponse(session_uuid=s.session_uuid, session_name=s.session_name, created_at=s.created_at.isoformat() + "Z") for s in sessions]
+    return [CreateSessionResponse(session_uuid=s.session_uuid, session_name=s.session_name, created_at=s.created_at.isoformat()) for s in sessions]
 
 
 @app.get("/api/users/{user_id}/sessions/{session_uuid}/transcripts", response_model=List[TranscriptResponse])
@@ -243,7 +244,7 @@ async def get_session_transcripts(user_id: str, session_uuid: str = Path(...)):
             transcript_uuid=t.transcript_uuid,
             filename=t.filename,
             transcript=t.transcript,
-            timestamp=t.timestamp.isoformat() + "Z",
+            timestamp=t.timestamp.isoformat(),
         )
         for t in transcripts
     ]
@@ -266,7 +267,7 @@ async def upload_audio_to_session(
         session_uuid=session_uuid,
         filename=audio.filename,
         transcript=transcript_text,
-        timestamp=datetime.now().replace(second=0, microsecond=0),
+        timestamp=datetime.now(ZoneInfo("America/Los_Angeles")).replace(second=0, microsecond=0),
     )
     db.add(transcript_obj)
     db.commit()
@@ -278,7 +279,7 @@ async def upload_audio_to_session(
             transcript_uuid=t.transcript_uuid,
             filename=t.filename,
             transcript=t.transcript,
-            timestamp=t.timestamp.isoformat() + "Z",
+            timestamp=t.timestamp.isoformat(),
         )
         for t in transcripts_list
     ]
