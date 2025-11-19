@@ -40,6 +40,10 @@ export default function App() {
     const [loading, setLoading] = useState(false);
     const mediaStreamRef = useRef(null);
     const [menuOpenSession, setMenuOpenSession] = useState(null);
+    // Summary modal state
+    const [summaryModalOpen, setSummaryModalOpen] = useState(false);
+    const [summaryText, setSummaryText] = useState("");
+    const [summaryLoading, setSummaryLoading] = useState(false);
 
     // New: share modal
     const [shareOpen, setShareOpen] = useState(false);
@@ -69,14 +73,17 @@ export default function App() {
             const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions`);
             const data = await res.json();
             setSessions(data || []);
-            // choose last created or provided
+
             if (data && data.length > 0) {
                 const toSelect = selectUuid || data[data.length - 1].session_uuid;
                 setSelectedSession(toSelect);
                 await loadTranscripts(toSelect);
+                return toSelect; // RETURN the selected session UUID
             }
+            return null;
         } catch (e) {
             console.error(e);
+            return null;
         }
     }
 
@@ -99,6 +106,26 @@ export default function App() {
         }
     }
 
+    async function handleSummarizeSession(sessionUuid) {
+        setSummaryModalOpen(true);
+        setSummaryLoading(true);
+        setSummaryText("");
+
+        try {
+            const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions/${sessionUuid}/summary`);
+            if (!res.ok) {
+                const err = await res.text();
+                throw new Error(err || "Failed to fetch summary");
+            }
+            const data = await res.json();
+            setSummaryText(data.summary || "No summary returned.");
+        } catch (e) {
+            setSummaryText("Error generating summary: " + e.message);
+        } finally {
+            setSummaryLoading(false);
+        }
+    }
+
     async function handleNewSession() {
         try {
             const name = pdtNowName();
@@ -109,23 +136,23 @@ export default function App() {
             });
 
             if (!res.ok) {
-                setMessage("Could not create session");
+                console.error("Could not create session");
                 return;
             }
 
             await refreshSessions();
-            setMessage("New session created");
+            console.log("New session created");
 
             // On mobile, close sidebar after creating to show the main screen
             if (window.innerWidth < 768) setSidebarOpen(false);
         } catch (e) {
-            setMessage("Session error: " + e.message);
+            console.error("Session error: " + e.message);
         }
     }
 
     async function ensureSessionBeforeRecording() {
         if (!selectedSession) {
-            setMessage("Creating a new session...");
+            console.log("Creating a new session...");
             const name = pdtNowName();
             try {
                 const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions`, {
@@ -134,23 +161,22 @@ export default function App() {
                     body: JSON.stringify({session_name: name}),
                 });
                 if (!res.ok) {
-                    setMessage("Could not create session");
+                    console.error("Could not create session");
                     return null;
                 }
 
-                const newSessionUuid = await refreshSessions();
-                setMessage("New session created, starting recording...");
-                return newSessionUuid;
+                const newSessionUuid = await refreshSessions(); // auto-select the new session
+                console.log("New session created, starting recording...");
+                return newSessionUuid; // RETURN the UUID
             } catch (e) {
-                setMessage("Session creation error: " + e.message);
+                console.error("Session creation error: " + e.message);
                 return null;
             }
         }
-        return selectedSession;
+        return selectedSession; // session already exists
     }
 
     async function handleStartRecording() {
-        setMessage(null);
 
         const sessionToUse = await ensureSessionBeforeRecording();
         if (!sessionToUse) return;
@@ -174,7 +200,7 @@ export default function App() {
 
         mr.onstop = async () => {
             if (!chunks.length) {
-                setMessage("⚠ No audio captured!");
+                console.error("⚠ No audio captured!");
                 return;
             }
 
@@ -203,10 +229,10 @@ export default function App() {
     async function uploadAudioBlob(blob, sessionUuid) {
         const uuid = sessionUuid || selectedSession;
         if (!uuid) {
-            setMessage("No session selected.");
+            console.log("No session selected.");
             return;
         }
-        setMessage("Uploading audio...");
+        console.log("Uploading audio...");
         try {
             const form = new FormData();
             const filename = `recording_${Date.now()}.webm`;
@@ -219,22 +245,22 @@ export default function App() {
 
             if (!res.ok) {
                 const err = await res.text();
-                setMessage("Upload failed: " + err);
+                console.error("Upload failed: " + err);
                 return;
             }
 
             const data = await res.json();
             setTranscripts(data || []);
-            setMessage("Uploaded and transcribed.");
+            console.log("Uploaded and transcribed.");
         } catch (e) {
             console.error(e);
-            setMessage("Upload error: " + (e.message || e));
+            console.error("Upload error: " + (e.message || e));
         }
     }
 
     async function sendEmailRequest({toEmail, includeSummaryFlag, sessionUuid}) {
         if (!sessionUuid) {
-            setMessage("No session selected.");
+            console.log("No session selected.");
             return {ok: false, error: "no-session"};
         }
         if (!toEmail) {
@@ -242,7 +268,7 @@ export default function App() {
             return {ok: false, error: "no-email"};
         }
 
-        setMessage("Sending email...");
+        console.log("Sending email...");
         try {
             const payload = {
                 user_id: USER_ID,
@@ -258,14 +284,13 @@ export default function App() {
             });
             if (!res.ok) {
                 const err = await res.text();
-                setMessage("Failed to send email: " + err);
+                console.log("Failed to send email: " + err);
                 return {ok: false, error: err};
             }
             setMessage("Email sent.");
             return {ok: true};
         } catch (e) {
             console.error(e);
-            setMessage("Email error: " + (e.message || e));
             return {ok: false, error: e};
         }
     }
@@ -280,6 +305,14 @@ export default function App() {
             setShareOpen(false);
         }
     }
+
+    // Auto-hide message after 3 seconds
+    useEffect(() => {
+        if (!message) return;
+        const timeout = setTimeout(() => setMessage(null), 3000);
+        return () => clearTimeout(timeout);
+    }, [message]);
+
 
     useEffect(() => {
         function onKey(e) {
@@ -375,7 +408,20 @@ export default function App() {
 
                                 {menuOpenSession === s.session_uuid && (
                                     <div
-                                        className="absolute right-0 top-full mt-1 w-28 bg-white border rounded shadow z-50">
+                                        className="absolute right-0 top-full mt-1 w-32 bg-white border rounded shadow-xl z-50 py-1">
+                                        {/* NEW SUMMARIZE BUTTON */}
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setMenuOpenSession(null);
+                                                handleSummarizeSession(s.session_uuid);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 hover:text-blue-600"
+                                        >
+                                            Summarize
+                                        </button>
+
+                                        {/* EXISTING DELETE BUTTON */}
                                         <button
                                             onClick={async (e) => {
                                                 e.stopPropagation();
@@ -385,10 +431,10 @@ export default function App() {
                                                         method: "DELETE",
                                                     });
                                                     if (!res.ok) {
-                                                        setMessage("Failed to delete session");
+                                                        console.error("Failed to delete session");
                                                         return;
                                                     }
-                                                    setMessage("Session deleted");
+                                                    console.log("Session deleted");
 
                                                     if (selectedSession === s.session_uuid) {
                                                         setSelectedSession(null);
@@ -396,8 +442,7 @@ export default function App() {
                                                     }
                                                     await refreshSessions();
                                                 } catch (err) {
-                                                    console.error(err);
-                                                    setMessage("Delete error: " + err.message);
+                                                    console.error("Delete error: " + err.message);
                                                 } finally {
                                                     setMenuOpenSession(null);
                                                 }
@@ -522,8 +567,23 @@ export default function App() {
                         </div>
 
                         <div className="mt-6"/>
-                        {message && <div
-                            className="mt-4 text-center text-sm text-gray-700 bg-yellow-50 p-2 rounded">{message}</div>}
+                        {message && (
+                            <div
+                                className={`
+            fixed bottom-6 left-1/2 transform -translate-x-1/2
+            px-4 py-3 rounded-xl shadow-xl text-white text-sm
+            transition-opacity duration-500
+            ${message.toLowerCase().includes("error") || message.toLowerCase().includes("fail")
+                                    ? "bg-red-500"
+                                    : "bg-green-600"
+                                }
+        `}
+                                style={{zIndex: 9999}}
+                            >
+                                {message}
+                            </div>
+                        )}
+
                     </div>
                 </div>
             </main>
@@ -577,6 +637,52 @@ export default function App() {
 
                         <div
                             className="mt-3 text-xs text-gray-400 truncate">Session: {selectedSession || "(no session selected)"}</div>
+                    </div>
+                </div>
+            )}
+
+            {/* Summary Modal */}
+            {summaryModalOpen && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 sm:p-6">
+                    <div className="fixed inset-0 bg-black/30 backdrop-blur-sm"
+                         onClick={() => setSummaryModalOpen(false)}/>
+
+                    <div
+                        className="relative w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl p-6 z-[70] ring-1 ring-gray-200 mx-4 max-h-[80vh] flex flex-col">
+                        <div className="flex items-center justify-between shrink-0">
+                            <div>
+                                <h3 className="text-lg font-semibold text-blue-600">Session Summary</h3>
+                            </div>
+                            <button onClick={() => setSummaryModalOpen(false)}
+                                    className="p-2 rounded-full hover:bg-gray-100 transition">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                     strokeWidth="2">
+                                    <path d="M18 6L6 18"/>
+                                    <path d="M6 6l12 12"/>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <div className="mt-4 overflow-y-auto flex-1">
+                            {summaryLoading ? (
+                                <div className="flex flex-col items-center justify-center py-8">
+                                    <div
+                                        className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
+                                    <p className="text-gray-500 text-sm">Generating summary...</p>
+                                </div>
+                            ) : (
+                                <div className="prose prose-sm max-w-none">
+                                    <p className="whitespace-pre-wrap text-gray-700">{summaryText}</p>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-4 flex justify-end shrink-0">
+                            <button onClick={() => setSummaryModalOpen(false)}
+                                    className="px-4 py-2 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-800 transition text-sm">
+                                Close
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
