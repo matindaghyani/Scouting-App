@@ -447,7 +447,7 @@ export default function App() {
                                                     setMenuOpenSession(null);
                                                 }
                                             }}
-                                            className="w-full text-left px-3 py-1 text-red-500 hover:bg-red-50 rounded"
+                                            className="w-full text-left px-3 py-1 text-sm text-red-500 hover:bg-red-50 rounded"
                                         >
                                             Delete
                                         </button>
