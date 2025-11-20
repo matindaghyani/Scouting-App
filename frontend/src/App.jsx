@@ -586,6 +586,11 @@ export default function App() {
 
                     </div>
                 </div>
+            {/* Footer Credit */}
+            <div className="w-full text-center py-4 text-gray-500 text-[10px] opacity-80">
+                Created by <span className="font-semibold">Raha</span> &{" "}
+                <span className="font-semibold">Matin</span>
+            </div>
             </main>
 
             {/* Share Modal */}
