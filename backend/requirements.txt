@@ -6,3 +6,5 @@ pydantic-settings
 openai
 sqlalchemy
 requests
+gunicorn
+pydantic[email]

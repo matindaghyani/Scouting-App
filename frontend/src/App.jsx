@@ -1,6 +1,6 @@
 import React, {useEffect, useRef, useState} from "react";
 
-const API_BASE = window.__API_BASE__ || import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API_BASE = "https://hockeyscout.app";
 const USER_ID = "user"; // fixed user per requirements
 
 function formatTimestampISO(iso) {
