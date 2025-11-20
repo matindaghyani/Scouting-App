@@ -8,3 +8,4 @@ sqlalchemy
 requests
 gunicorn
 pydantic[email]
+resend

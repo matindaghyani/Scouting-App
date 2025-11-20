@@ -1,4 +1,3 @@
-import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional, List
@@ -23,17 +22,14 @@ from sqlalchemy import (
     ForeignKey,
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
+import resend
 class Settings(BaseSettings):
     openai_api_key: str
     stt_model: str = "whisper-1"
     gpt_model: str = "gpt-4.1-mini"
 
-    smtp_host: str
-    smtp_port: int = 587
-    smtp_username: str
-    smtp_password: str
-    smtp_use_tls: bool = True
-    from_email: EmailStr
+    email_api_key: str
+    from_email: str
 
     database_url: str = "sqlite:///./scouting.db"
 
@@ -133,28 +129,23 @@ def send_email(
     body_html: str,
     body_text: Optional[str] = None,
 ) -> None:
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = settings.from_email
-    msg["To"] = to_email
+    
+    resend.api_key = settings.email_api_key
 
-    if body_text is None:
-        body_text = "Your email client does not support HTML.\n\n" + body_html
-
-    part1 = MIMEText(body_text, "plain")
-    part2 = MIMEText(body_html, "html")
-    msg.attach(part1)
-    msg.attach(part2)
+    params = {
+        "from": settings.from_email,
+        "to": [to_email],
+        "subject": subject,
+        "html": body_html,
+    }
+    
+    if body_text:
+        params["text"] = body_text
 
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
-            if settings.smtp_use_tls:
-                server.starttls()
-            server.login(settings.smtp_username, settings.smtp_password)
-            server.sendmail(settings.from_email, [to_email], msg.as_string())
+        email = resend.Emails.send(params)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send email: {e}")
-
 
 def build_email_html(subject: str, transcripts: List[TranscriptResponse], session_summary: Optional[str] = None) -> str:
     transcripts_html = "".join(
