@@ -21,5 +21,4 @@ The session summarizer analyzes all transcript entries in a selected session and
 - Backend APIs and persistent storage for sessions and transcripts.
 
 ## Copyright
-
 © 2026 Hockey Scout. All rights reserved.
